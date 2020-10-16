@@ -24,6 +24,8 @@ ui <- fluidPage(
                                       "text/comma-separated-values,text/plain",
                                       ".csv")),
                  tags$hr(style="border-color: black;"),
+                 h6("What timescale?"),
+                 radioButtons("time", "Choose:", choices = c("Hourly" = 1, "Daily" = 2, "Weekly" = 3)),
                  h6("Do you want to forecast or test predictions?"),
                  radioButtons("type","Choose:", choices = c("Forecast" = 1,"Train/Test" = 2)),
                  conditionalPanel(
@@ -68,7 +70,7 @@ server <- function(input, output) {
                    sep = ","
     )
     
-    df$ds <- as.POSIXct(anydate(df$ds), format='%Y-%m-%d')
+    df$ds <- anytime(df$ds, tz = "GMT")
     
     if (input$type == 2) {
       train <- tail(df, input$testdatasize)
@@ -84,7 +86,14 @@ server <- function(input, output) {
     m <- add_country_holidays(m,'England')
     m <- fit.prophet(m, df)
     
-    future_short <- make_future_dataframe(m, periods = periods, freq = "w")
+    type <- input$time
+    
+    future_short <- make_future_dataframe(m, periods = periods, freq = "h")
+    
+    #case_when( 
+     #                                                                 type == 1 ~ "h",
+      #                                                                type == 2 ~ "d",
+       #                                                               type == 3 ~ "w"))
     fcst <- predict(m, future_short)
     
     samples <- predictive_samples(m, future_short)
