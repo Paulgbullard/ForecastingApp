@@ -1,7 +1,3 @@
-#Small Shiny app to predict ED demand using FB Prophet (https://facebook.github.io/prophet/)
-#Requires data processed via NHS Demand and Capacity Team ED Model for correct formatting
-#Outputs .CSV file with predicted attendances for the next week (by hour).
-
 #Required libraries:
 library(shiny)
 library(prophet)
@@ -11,6 +7,7 @@ library(ggplot2)
 library(dplyr)
 library(shinyjs)
 library(lubridate)
+library(reshape2)
 
 #Define UI for data upload
 
@@ -124,6 +121,8 @@ ui <- fluidPage(
 
 #Define server logic to process uploaded file
 server <- function(input, output, session) {
+  
+  #UI GENERATION
   #Slider labels
   observeEvent(input$time, {
     val <- input$time
@@ -167,35 +166,6 @@ server <- function(input, output, session) {
     )
   })
   
-  #Prep Prophet
-  m <-
-    prophet(
-      yearly.seasonality = TRUE,
-      monthly.seasonality = TRUE,
-      daily.seasonality = TRUE,
-      interval.width = 0.85
-    )
-  m <- add_country_holidays(m, 'England')
-  
-  df <- reactive({
-    df <- read.csv(input$file1$datapath,
-                   header = TRUE,
-                   sep = ",")
-    
-    df$ds <- anytime(df$ds, tz = "GMT")
-    return(df)
-  })
-  
-  #Get stream count
-  counter <- reactive({
-    if (is.null(input$file1)) {
-      return(NULL)
-    }
-    data_set <- df()
-    counter <- ncol(data_set) - 1
-    return(counter)
-  })
-  
   output$tabs <- renderUI({
     counter <- counter()
     if (is.null(fcst_short())) {
@@ -226,12 +196,47 @@ server <- function(input, output, session) {
                           value = c(mini, maxi)
                         )
                       )))
-    }
+    }})
+  
+  #Prep Prophet
+  m <-
+    prophet(
+      yearly.seasonality = TRUE,
+      monthly.seasonality = TRUE,
+      daily.seasonality = TRUE,
+      interval.width = 0.85
+    )
+  m <- add_country_holidays(m, 'England')
+  
+  #Read datafile
+  df <- reactive({
+    df <- read.csv(input$file1$datapath,
+                   header = TRUE,
+                   sep = ",")
+    
+    df$ds <- anytime(df$ds, tz = "GMT")
+    return(df)
   })
   
+  #Get stream count
+  counter <- reactive({
+    if (is.null(input$file1)) {
+      return(NULL)
+    }
+    data_set <- df()
+    counter <- ncol(data_set) - 1
+    return(counter)
+  })
+  
+  #Get file name
+  file_name <- eventReactive(input$go, {
+    file_name <- input$file1$name
+    return(file_name)
+  })
   
   #Process data through prophet
   fcst_short <- eventReactive(input$go, {
+    
     df <- df()
     
     if (input$type == 2) {
@@ -251,6 +256,16 @@ server <- function(input, output, session) {
       x <- append(x, colnames(df[i]))
     }
     
+    if (input$type == 2) {
+      for (i in 1:length(x)) {
+        assign(paste("df", x[i], sep = ""), data.frame(df[1], df[i + 1]))
+        d <- get(paste("df", x[i], sep = ""))
+        names(d) <- c("ds", "y")
+        assign(paste("df", x[i], sep = ""), d)
+        d <- NULL
+        assign(paste("m", x[i], sep = ""), fit.prophet(m, get(paste("df", x[i], sep = ""))))
+        assign(paste("train", x[i], sep = ""), data.frame(train[1], train[i + 1]))}
+    } else {
     for (i in 1:length(x)) {
       assign(paste("df", x[i], sep = ""), data.frame(df[1], df[i + 1]))
       d <- get(paste("df", x[i], sep = ""))
@@ -258,13 +273,13 @@ server <- function(input, output, session) {
       assign(paste("df", x[i], sep = ""), d)
       d <- NULL
       assign(paste("m", x[i], sep = ""), fit.prophet(m, get(paste("df", x[i], sep = ""))))
-    }
+    }}
     
     val <- input$time
     
-    freq <- case_when(val == "1" ~ 60 * 60,
-                      val == "2" ~ "d",
-                      val == "3" ~ "w")
+    freq <- if(val == "1") {60*60} else { 
+      case_when(val == "2" ~ "d",
+                val == "3" ~ "w")}
     
     future <- make_future_dataframe(
       get(paste("m", x[1], sep = "")),
@@ -283,27 +298,58 @@ server <- function(input, output, session) {
     
     for (i in 1:length(x)) {
       assign(paste("forecast", x[i], sep = ""), predict(get(paste("m", x[i], sep =
-                                                                    "")), future))
+                                                                    "")), future))}
       
       for (i in 1:length(x)) {
         assign(paste("samples", x[i], sep = ""),
                predictive_samples(get(paste(
                  "m", x[i], sep = ""
                )),
-               future_short))
+               future))
       }
       
-      centile_calc <- melt(samples$yhat) %>%
-        select(Var1, value) %>%
-        group_by(Var1) %>%
-        summarise(
-          '65percentile' = quantile(value, 0.65),
-          '70percentile' = quantile(value, 0.7),
-          '75percentile' = quantile(value, 0.75),
-          '80percentile' = quantile(value, 0.8),
-          '85percentile' = quantile(value, 0.85)
-        )
       
+      for (i in 1:length(x)) {
+        assign(paste("centile_calc", x[i], sep = ""),
+               melt(get(paste("samples",x[i], sep = ""))$yhat))
+        assign(paste("centile_calc", x[i], sep = ""),
+               get(paste("centile_calc", x[i], sep = "")) %>%   
+               select(Var1, value) %>% 
+                 group_by(Var1) %>% 
+                 summarise('65percentile' = quantile(value, 0.65),
+                           '70percentile' = quantile(value, 0.7),
+                           '75percentile' = quantile(value, 0.75),
+                           '80percentile' = quantile(value, 0.8),
+                           '85percentile' = quantile(value, 0.85)
+                 )
+        )
+        assign(paste("forecast",x[i], sep = ""),
+               cbind(get(paste("forecast",x[i], sep = "")),get(paste("centile_calc", x[i], sep = ""))))}
+      
+    for (i in 1:length(x)) {
+      if (input$type == 2) {
+        d <- get(paste("forecast", x[i], sep = ""))
+        d <- left_join(d, get(paste("train", x[i], sep = "")))
+        d <- d %>% 
+          select('ds',paste0(x[i]),'yhat','yhat_lower','yhat_upper','65percentile','70percentile','75percentile','80percentile','85percentile')
+        names(d) <- c( "ds",
+                       paste("y", x[i], sep = ""),
+                       paste("yhat", x[i], sep = ""),
+                       paste("yhat_lower", x[i], sep = ""),
+                       paste("yhat_upper", x[i], sep = ""),
+                       paste("65percentile", x[i], sep = ""),
+                       paste("70percentile",x[i], sep = ""),
+                       paste("75percentile",x[i], sep = ""),
+                       paste("80percentile", x[i], sep = ""),
+                       paste("85percentile", x[i], sep = "")) 
+        assign(paste("forecast", x[i], sep = ""), d)
+        if (is_empty(df)) {
+          df <-
+            get(paste("forecast", x[i], sep = ""))
+        } else {
+          df <- cbind(df, get(paste("forecast", x[i], sep = "")))}
+      } 
+      else {
       d <- get(paste("forecast", x[i], sep = ""))
       d <- d %>%
         select("ds", "yhat", "yhat_lower", "yhat_upper")
@@ -320,8 +366,7 @@ server <- function(input, output, session) {
           get(paste("forecast", x[i], sep = ""))
       } else {
         df <- cbind(df, get(paste("forecast", x[i], sep = "")))
-      }
-    }
+      } }} 
     
     combined <- data.frame()
     
@@ -336,7 +381,7 @@ server <- function(input, output, session) {
            ))))
       }
     }
-    combined[is.na(combined)] <- 0
+      combined[is.na(combined)] <- 0
     fcst_short <- tail(combined, (168 * 6))
     
     return(fcst_short)
@@ -360,29 +405,37 @@ server <- function(input, output, session) {
       filter(ds >= input$dates[1] & ds <= input$dates[2])
     fcst_m <- max(myData[paste0("yhat_upper", input$streamtab)])
     
-    
-    ggplot(data = myData, aes(
-      x = ds,
-      y = get(paste0("yhat", input$streamtab)),
-      group = 1
-    )) +
-      geom_ribbon(aes(ymin = get(
-        paste0("yhat_lower", input$streamtab)
-      ), ymax = get(
-        paste0("yhat_upper", input$streamtab)
-      )),
-      fill = "blue",
-      alpha = 0.3) +
-      geom_line() +
-      ggtitle(paste0(input$streamtab)) +
-      xlab("Date") +
-      ylab("Attendances") +
-      #scale_x_datetime(date_breaks = "12 hours",expand = c(0,0))+
-      theme(plot.title = element_text(size = 22),
-            axis.text.x = element_text(angle = 90, hjust = 1)) +
-      coord_cartesian(ylim = c(0, fcst_m), expand = FALSE)
-  })
-  
+    fcst <- myData
+    percentile_text <- paste("fcst$\'",input$percentileselection, "\'", sep="")
+    percentile_text <- eval(parse(text = percentile_text))
+      
+      if (input$type == 2) {
+        
+        ggplot(data = myData, aes(x=ds, y=get(paste0("yhat",input$streamtab))))+
+          geom_ribbon(aes(ymin = get(paste0("yhat_lower",input$streamtab)), ymax = get(paste0("yhat_upper",input$streamtab))), fill = "blue", alpha=0.3, show.legend = TRUE)+
+          #geom_ribbon(aes(ymin = percentile_text, ymax = fcst()$'85percentile'), fill = 'blue', alpha = 0.7, show.legend = TRUE)+ 
+          geom_point(aes(x = ds, y = get(paste0("y",input$streamtab)))) +
+          ggtitle(file_name())+
+          xlab("Date")+
+          ylab("Attendances")+
+          #scale_x_datetime(date_breaks = "6 months")+
+          theme(plot.title = element_text(size = 22), axis.text.x = element_text(angle = 90, hjust = 1))+
+          coord_cartesian(ylim = c(0,fcst_m))
+        
+      }
+      else {
+        
+        ggplot(data = myData, aes(x=ds,y=get(paste0("yhat",input$streamtab)), group = 1))+
+          geom_ribbon(aes(ymin = get(paste0("yhat_lower",input$streamtab)), ymax = get(paste0("yhat_upper",input$streamtab))),fill = "blue", alpha = 0.3)+
+          geom_line()+
+          ggtitle(paste0(input$streamtab))+
+          xlab("Date")+
+          ylab("Attendances")+
+          #scale_x_datetime(date_breaks = "12 hours",expand = c(0,0))+
+          theme(plot.title = element_text(size = 22), axis.text.x = element_text(angle = 90, hjust = 1))+
+          coord_cartesian(ylim = c(0,fcst_m), expand = FALSE)
+      }
+  }) 
   
   #Define download parameters for outputs
   output$downloadData <- downloadHandler(
